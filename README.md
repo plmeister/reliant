@@ -210,3 +210,7 @@ state DBs under `deploy/portfolios/<id>/state/`.
 - Deleting a portfolio's `state/` directory resets its pipeline cursor.
 - `deploy/systemd/` predates the multi-portfolio supervisor and should not be
   used as-is.
+- **Recovery caveat:** the pipeline cursor is currently owned by the enricher.
+  A crash of a downstream role after the cursor advances can leave that role
+  behind on restart; per-role replay/end-to-end recovery is still a work in
+  progress (see the architectural QA notes).
