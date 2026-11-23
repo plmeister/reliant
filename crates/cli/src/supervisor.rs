@@ -295,6 +295,9 @@ fn dispatch(
                     Err(_) => break,
                 }
             }
+            while let Ok((subject, event)) = rx.try_recv() {
+                enqueue(&shared, &subject, event, true);
+            }
         })
     });
 
@@ -307,6 +310,11 @@ fn dispatch(
             }
             Err(_) => break,
         }
+    }
+    // Drain anything still buffered in the inbound receiver before the
+    // workers perform their final queue drain.
+    while let Ok((subject, event)) = rx.try_recv() {
+        enqueue(&shared, &subject, event, false);
     }
     if let Some(h) = warm_handle {
         h.join().ok();

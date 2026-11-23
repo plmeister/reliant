@@ -352,7 +352,7 @@ impl Node for StrategyNode {
                 c.indicators.insert(name.clone(), *value);
                 Vec::new()
             }
-            Event::SwingPivotEvent { symbol, timeframe, name, kind, price, atr, index, .. } => {
+            Event::SwingPivotEvent { symbol, timeframe, name, kind, price, atr, index, timestamp, .. } => {
                 // Older audit files carry no pivot name; accept those, but when
                 // a name is present it must be the wired swing producer.
                 if !name.is_empty() && name != &self.swing_key {
@@ -412,7 +412,7 @@ impl Node for StrategyNode {
                     stop,
                     target,
                     max_hold_secs: self.max_hold_bars as f64 * timeframe.bar_seconds() as f64,
-                    timestamp: *index,
+                    timestamp: *timestamp,
                     source: self.id.clone(),
                 })]
             }
@@ -1029,7 +1029,7 @@ impl Node for CandleSignal {
                 stop,
                 target,
                 max_hold_secs: self.max_hold_bars as f64 * timeframe.bar_seconds() as f64,
-                timestamp: *index,
+                timestamp: *timestamp,
                 source: self.id.clone(),
             })];
         }

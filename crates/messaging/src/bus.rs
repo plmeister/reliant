@@ -40,12 +40,24 @@ impl NatsMessageBus {
 
 #[cfg(feature = "nats")]
 impl MessageBus for NatsMessageBus {
-    fn publish(&mut self, topic: &str, event: Event) {
+    fn publish(&mut self, topic: &str, event: Event) -> Result<(), BusError> {
+        let payload = match serde_json::to_vec(&event) {
+            Ok(v) => bytes::Bytes::from(v),
+            Err(e) => {
+                eprintln!("nats: serialize event for {} failed: {}", topic, e);
+                return Err(BusError::Serialize(e.to_string()));
+            }
+        };
         let client = self.client.clone();
         let handle = self.handle.clone();
         let topic = topic.to_string();
-        let payload = bytes::Bytes::from(serde_json::to_vec(&event).unwrap_or_default());
-        let _ = handle.block_on(async { client.publish(topic, payload).await });
+        match handle.block_on(async { client.publish(topic.clone(), payload).await }) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                eprintln!("nats: publish {} failed: {}", topic, e);
+                Err(BusError::Publish(e.to_string()))
+            }
+        }
     }
 
     fn subscribe(&mut self, topic: &str) -> Receiver<Event> {
@@ -60,7 +72,7 @@ impl MessageBus for NatsMessageBus {
             .block_on(async { subscribe_flushed(&client, topic, None).await });
         let mut sub = match sub {
             Some(s) => s,
-            None => return rx,
+            None => panic!("nats: subscription to {} failed", topic),
         };
         self.handle.spawn(async move {
             while let Some(msg) = sub.next().await {
@@ -96,7 +108,7 @@ impl MessageBus for NatsMessageBus {
             .block_on(async { subscribe_flushed(&client, topic, None).await });
         let mut sub = match sub {
             Some(s) => s,
-            None => return rx,
+            None => panic!("nats: subscription to {} failed", topic),
         };
         self.handle.spawn(async move {
             while let Some(msg) = sub.next().await {
@@ -119,7 +131,7 @@ impl MessageBus for NatsMessageBus {
             .block_on(async { subscribe_flushed(&client, topic, Some(group)).await });
         let mut sub = match sub {
             Some(s) => s,
-            None => return rx,
+            None => panic!("nats: subscription to {} failed", topic),
         };
         self.handle.spawn(async move {
             while let Some(msg) = sub.next().await {
@@ -163,8 +175,15 @@ async fn subscribe_flushed(
     Some(sub)
 }
 
+#[derive(Debug)]
+pub enum BusError {
+    Serialize(String),
+    Publish(String),
+    Subscribe(String),
+}
+
 pub trait MessageBus {
-    fn publish(&mut self, topic: &str, event: Event);
+    fn publish(&mut self, topic: &str, event: Event) -> Result<(), BusError>;
     fn subscribe(&mut self, topic: &str) -> Receiver<Event>;
     /// Subscribe with a NATS queue group so multiple instances share the load.
     fn queue_subscribe(&mut self, topic: &str, group: &str) -> Receiver<Event> {
@@ -190,30 +209,99 @@ pub trait MessageBus {
     }
 }
 
+#[derive(Clone)]
+struct InMemSub {
+    tx: SyncSender<Event>,
+    group: Option<String>,
+}
+
 #[derive(Default)]
 pub struct InMemoryMessageBus {
-    subscribers: HashMap<String, Vec<SyncSender<Event>>>,
+    subscribers: HashMap<String, Vec<InMemSub>>,
+    queue_counters: HashMap<String, usize>,
 }
 
 impl InMemoryMessageBus {
     pub fn new() -> Self {
-        Self { subscribers: HashMap::new() }
+        Self { subscribers: HashMap::new(), queue_counters: HashMap::new() }
     }
 }
 
+fn subject_matches(pattern: &str, subject: &str) -> bool {
+    let p: Vec<&str> = pattern.split('.').collect();
+    let s: Vec<&str> = subject.split('.').collect();
+    // '>' must be the last token and matches the rest.
+    if let Some((last, rest)) = p.split_last() {
+        if *last == ">" {
+            if rest.len() > s.len() { return false; }
+            for i in 0..rest.len() {
+                if rest[i] != "*" && rest[i] != s[i] { return false; }
+            }
+            return true;
+        }
+    }
+    if p.len() != s.len() { return false; }
+    for i in 0..p.len() {
+        if p[i] != "*" && p[i] != s[i] { return false; }
+    }
+    true
+}
+
 impl MessageBus for InMemoryMessageBus {
-    fn publish(&mut self, topic: &str, event: Event) {
-        if let Some(senders) = self.subscribers.get(topic) {
-            for s in senders {
-                // block rather than drop: backpressure instead of silent event loss
-                let _ = s.send(event.clone());
+    fn publish(&mut self, topic: &str, event: Event) -> Result<(), BusError> {
+        // Collect matching subscriptions across all patterns.
+        let mut matched: Vec<(String, InMemSub)> = Vec::new();
+        for (pattern, subs) in &self.subscribers {
+            if subject_matches(pattern, topic) {
+                for sub in subs {
+                    matched.push((pattern.clone(), sub.clone()));
+                }
             }
         }
+        // Non-grouped subscribers receive every message.
+        for (_, sub) in &matched {
+            if sub.group.is_none() {
+                let _ = sub.tx.send(event.clone());
+            }
+        }
+        // Grouped subscribers: one delivery per group (round-robin).
+        let mut groups: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for (_, sub) in &matched {
+            if let Some(g) = &sub.group {
+                groups.insert(g.clone());
+            }
+        }
+        for group in groups {
+            let candidates: Vec<InMemSub> = matched
+                .iter()
+                .filter(|(_, s)| s.group.as_deref() == Some(group.as_str()))
+                .map(|(_, s)| s.clone())
+                .collect();
+            if candidates.is_empty() { continue; }
+            let key = format!("{}:{}", topic, group);
+            let idx = self.queue_counters.entry(key).or_insert(0);
+            let chosen = candidates[*idx % candidates.len()].clone();
+            *idx = idx.wrapping_add(1);
+            let _ = chosen.tx.send(event.clone());
+        }
+        Ok(())
     }
 
     fn subscribe(&mut self, topic: &str) -> Receiver<Event> {
         let (tx, rx) = mpsc::sync_channel(4096);
-        self.subscribers.entry(topic.to_string()).or_default().push(tx);
+        self.subscribers
+            .entry(topic.to_string())
+            .or_default()
+            .push(InMemSub { tx, group: None });
+        rx
+    }
+
+    fn queue_subscribe(&mut self, topic: &str, group: &str) -> Receiver<Event> {
+        let (tx, rx) = mpsc::sync_channel(4096);
+        self.subscribers
+            .entry(topic.to_string())
+            .or_default()
+            .push(InMemSub { tx, group: Some(group.to_string()) });
         rx
     }
 }
