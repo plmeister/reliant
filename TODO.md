@@ -10,6 +10,7 @@
   - [x] Enricher caches last derived enrichment events per bar.
   - [x] On a replayed (already-processed) candle, republish cached enrichment without re-running indicators.
   - [x] Strategy/broker replay publish exec candle and setups; broker dedupes setups to avoid duplicate trades.
+  - [x] Broker dedupe persisted in context state (survives restart).
 - [ ] Give each hop a durable input.
   - [ ] Option 1: JetStream streams + durable consumers per subject.
   - [ ] Option 2: SQLite outbox per stage with per-consumer offsets.
