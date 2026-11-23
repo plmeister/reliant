@@ -46,9 +46,6 @@ pub struct Runtime {
     /// Cached enricher output per bar, used to republish without re-running
     /// indicators when a bar is replayed for downstream recovery.
     pub enrichment_cache: HashMap<(String, String, i64), Vec<(String, Event)>>,
-    /// Setup signals already acted on by the broker, used to suppress
-    /// duplicates during replay.
-    pub seen_setups: HashSet<String>,
 }
 
 struct Shared {
@@ -590,7 +587,8 @@ fn process_broker(rt: &mut Runtime, work: Work, out: &mut Vec<(String, Event)>) 
                 "{}:{}:{}:{}:{}",
                 symbol.0, timeframe.as_str(), timestamp, entry, stop
             );
-            if !rt.seen_setups.insert(key) {
+            let c = rt.graph.context().get_or_create(symbol.clone(), timeframe.clone());
+            if !c.seen_setups.insert(key) {
                 return;
             }
             let derived = rt.graph.derived("signal", &work.event);
@@ -721,7 +719,6 @@ fn build_runtime(portfolio: &Portfolio, role: Role) -> Result<Runtime, String> {
         checkpoints,
         trades: Vec::new(),
         enrichment_cache: HashMap::new(),
-        seen_setups: HashSet::new(),
     })
 }
 

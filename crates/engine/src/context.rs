@@ -1,5 +1,5 @@
 use reliant_datamodel::{Candle, Event, Processor, Symbol, Timeframe};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub struct Context {
     pub instrument: Symbol,
@@ -30,6 +30,8 @@ pub struct Context {
     pub trade_pending_size: Option<f64>,
     pub trade_pending_entry_ts: Option<i64>,
     pub trade_pending_valid: usize,
+    /// Setup signals already acted on by the broker (durable dedupe key).
+    pub seen_setups: HashSet<String>,
 }
 
 impl Context {
@@ -39,7 +41,8 @@ impl Context {
                trade_max_hold: None, trade_bars: 0, trade_entry_ts: None, trade_size: None, trade_source: None,
                trade_pending: false, trade_pending_market: false, trade_pending_entry: None, trade_pending_stop: None,
                trade_pending_target: None, trade_pending_direction: None, trade_pending_max_hold: None,
-               trade_pending_size: None, trade_pending_entry_ts: None, trade_pending_valid: 0 }
+               trade_pending_size: None, trade_pending_entry_ts: None, trade_pending_valid: 0,
+               seen_setups: HashSet::new() }
     }
 
     pub fn register(&mut self, processor: Box<dyn Processor>) {
@@ -90,6 +93,7 @@ impl Context {
         if let Some(v) = self.trade_pending_size { map.insert("trade_pending_size".to_string(), serde_json::json!(v)); }
         if let Some(v) = self.trade_pending_entry_ts { map.insert("trade_pending_entry_ts".to_string(), serde_json::json!(v)); }
         map.insert("trade_pending_valid".to_string(), serde_json::json!(self.trade_pending_valid));
+        map.insert("seen_setups".to_string(), serde_json::json!(self.seen_setups));
         serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string())
     }
 
@@ -137,6 +141,14 @@ impl Context {
         if name == "trade_pending_size" { self.trade_pending_size = v.as_f64(); continue; }
         if name == "trade_pending_entry_ts" { self.trade_pending_entry_ts = v.as_i64(); continue; }
         if name == "trade_pending_valid" { self.trade_pending_valid = v.as_u64().unwrap_or(0) as usize; continue; }
+        if name == "seen_setups" {
+            if let Some(arr) = v.as_array() {
+                for item in arr {
+                    if let Some(k) = item.as_str() { self.seen_setups.insert(k.to_string()); }
+                }
+            }
+            continue;
+        }
                 if let Some(p) = self.processors.get_mut(&name) {
                     p.load_json(&v.to_string());
                 }
