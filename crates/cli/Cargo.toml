@@ -1,0 +1,58 @@
+[package]
+name = "reliant-cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "reliant"
+path = "src/main.rs"
+
+[[bin]]
+name = "ingress"
+path = "src/bin/ingress.rs"
+
+[[bin]]
+name = "enricher"
+path = "src/bin/enricher.rs"
+
+[[bin]]
+name = "strategy"
+path = "src/bin/strategy.rs"
+
+[[bin]]
+name = "trade"
+path = "src/bin/trade.rs"
+
+[[bin]]
+name = "backtest"
+path = "src/bin/backtest.rs"
+
+[[bin]]
+name = "fetcher"
+path = "src/bin/fetcher.rs"
+
+[[bin]]
+name = "portfolio"
+path = "src/bin/portfolio.rs"
+
+[[bin]]
+name = "state-writer"
+path = "src/bin/state_writer.rs"
+
+[[bin]]
+name = "audit"
+path = "src/bin/audit.rs"
+
+[dependencies]
+reliant-datamodel = { path = "../datamodel" }
+reliant-engine = { path = "../engine" }
+reliant-store = { path = "../store" }
+reliant-messaging = { path = "../messaging" }
+reliant-indicators = { path = "../indicators" }
+reliant-portfolio = { path = "../portfolio" }
+reliant-dsl = { path = "../dsl" }
+clap = { version = "4", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+ctrlc = "3.4"
+libc = "0.2"

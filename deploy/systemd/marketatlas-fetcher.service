@@ -1,0 +1,13 @@
+[Unit]
+Description=MarketAtlas Fetcher (candle store updater)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/reliant-fetcher --daemon --portfolio /etc/reliant/portfolio.json --timeframes 1d,1h --candle-db /var/lib/reliant/candles.db --interval 3600 --max-stale-days 1
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF

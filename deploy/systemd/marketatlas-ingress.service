@@ -1,0 +1,13 @@
+[Unit]
+Description=MarketAtlas Ingress (candle publisher)
+After=network.target reliant-fetcher.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/reliant-ingress --daemon --portfolio /etc/reliant/portfolio.json --timeframe 1d --candle-db /var/lib/reliant/candles.db --bus nats://127.0.0.1:4222 --state-db /var/lib/reliant/state.sqlite --interval 60
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF

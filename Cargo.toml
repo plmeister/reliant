@@ -1,0 +1,13 @@
+[workspace]
+members = [
+    "crates/datamodel",
+    "crates/indicators",
+    "crates/engine",
+    "crates/messaging",
+    "crates/dsl",
+    "crates/cli",
+    "crates/store",
+    "crates/strategy",
+    "crates/portfolio",
+]
+resolver = "2"

@@ -1,0 +1,10 @@
+/target
+deploy/data/
+*.sqlite
+*.db
+*.dat
+*.dat.zstd
+*.jsonl
+deploy/portfolios/*/state/
+tools/audit-viewer/backend/target/
+/tmp/oc/

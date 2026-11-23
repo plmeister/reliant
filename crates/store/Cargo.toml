@@ -1,0 +1,14 @@
+[package]
+name = "reliant-store"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+reliant-datamodel = { path = "../datamodel" }
+rusqlite = "0.32"
+chrono = { version = "0.4", features = ["serde"] }
+parquet = "53"
+arrow = "53"
+reqwest = { version = "0.12", features = ["blocking"] }
+lzma-rs = "0.3"
+

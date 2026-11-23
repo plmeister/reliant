@@ -1,0 +1,191 @@
+# Integration test stack: Nats + all components in daemon mode + a test runner.
+# Usage:
+#   docker compose -f deploy/docker-compose.test.yml up -d --build
+#   docker compose -f deploy/docker-compose.test.yml run --rm tester
+#   docker compose -f deploy/docker-compose.test.yml down -v
+#
+# The candle store is seeded from local parquet files (PARQUET_DIR) so the stack
+# does not depend on the Dukascopy datafeed being reachable. The fetcher daemon
+# then only fetches genuinely new bars (and backs off when rate limited).
+
+services:
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [atlas-net]
+
+  # shared candle store volume
+  data:
+    image: busybox
+    volumes: ["./data:/data"]
+    command: ["sh", "-c", "mkdir -p /data && sleep infinity"]
+    networks: [atlas-net]
+
+  # one-shot: fix ownership of bind-mounted dirs for the non-root (10001) runtime
+  perm-fix:
+    image: busybox
+    volumes: ["./data:/data", "./portfolios:/portfolios"]
+    command: ["sh", "-c", "mkdir -p /data /portfolios && chown -R 10001:10001 /data /portfolios"]
+    networks: [atlas-net]
+    restart: "no"
+
+  # one-shot: seed candles.db from local parquet files (SYMBOL.TF.parquet)
+  seed:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["/usr/local/bin/fetcher", "--import-parquet", "/parquet", "--candle-db", "/data/candles.db"]
+    volumes:
+      - "./data:/data"
+      - "${PARQUET_DIR:-/home/scott/src/marketatlas/data/study}:/parquet:ro"
+    depends_on: [perm-fix]
+    networks: [atlas-net]
+    restart: "no"
+
+  fetcher:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["/usr/local/bin/fetcher", "--daemon", "--bus", "nats://nats:4222", "--portfolio", "/config/portfolio.json", "--timeframes", "1d", "--candle-db", "/data/candles.db", "--interval", "300", "--max-stale-days", "1", "--request-delay-ms", "750"]
+    volumes: ["./data:/data", "./config:/config"]
+    depends_on:
+      nats: { condition: service_healthy }
+      seed: { condition: service_completed_successfully }
+    networks: [atlas-net]
+    restart: unless-stopped
+
+  # Single write-behind writer. Components publish context snapshots on the
+  # `state` subject and never open the state DB for writing, so no component
+  # blocks on a SQLite lock and there is exactly one writer per file.
+  # `--portfolios-root` routes each snapshot to its own portfolio's state dir.
+  state-writer:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["/usr/local/bin/state-writer", "--daemon", "--bus", "nats://nats:4222", "--portfolios-root", "/portfolios", "--state-db", "/data/state.sqlite"]
+    volumes: ["./data:/data", "./portfolios:/portfolios"]
+    environment: ["RELIANT_READY_FILE=/tmp/ready"]
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/ready"]
+      interval: 1s
+      timeout: 1s
+      retries: 60
+      start_period: 5s
+    depends_on:
+      perm-fix: { condition: service_completed_successfully }
+      nats: { condition: service_healthy }
+    networks: [atlas-net]
+    restart: unless-stopped
+
+  # Start order is a readiness chain, not a sleep: each daemon writes
+  # RELIANT_READY_FILE only after its NATS subscription exists (the SUB is
+  # flushed to the server), so no consumer can miss a publisher's first burst.
+  trade:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["/usr/local/bin/trade", "--daemon", "--bus", "nats://nats:4222", "--portfolios-root", "/portfolios", "--workers", "2"]
+    volumes: ["./portfolios:/portfolios"]
+    environment:
+      - "RELIANT_READY_FILE=/tmp/ready"
+      - "OANDA_ACCOUNT_ID=${OANDA_ACCOUNT_ID:-101-001-00000000-000}"
+      - "OANDA_ACCESS_TOKEN=${OANDA_ACCESS_TOKEN:-dry-token-for-practice}"
+      - "OANDA_BASE_URL=${OANDA_BASE_URL:-https://api-fxpractice.oanda.com}"
+      - "OANDA_DRY_RUN=${OANDA_DRY_RUN:-1}"
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/ready"]
+      interval: 1s
+      timeout: 1s
+      retries: 120
+      start_period: 5s
+    depends_on:
+      state-writer: { condition: service_healthy }
+    networks: [atlas-net]
+    restart: unless-stopped
+
+  strategy:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["/usr/local/bin/strategy", "--daemon", "--bus", "nats://nats:4222", "--portfolios-root", "/portfolios", "--workers", "2"]
+    volumes: ["./portfolios:/portfolios"]
+    environment: ["RELIANT_READY_FILE=/tmp/ready"]
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/ready"]
+      interval: 1s
+      timeout: 1s
+      retries: 120
+      start_period: 5s
+    depends_on:
+      trade: { condition: service_healthy }
+    networks: [atlas-net]
+    restart: unless-stopped
+
+  enricher:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["/usr/local/bin/enricher", "--daemon", "--bus", "nats://nats:4222", "--portfolios-root", "/portfolios", "--workers", "2", "--candle-db", "/data/candles.db"]
+    volumes: ["./data:/data", "./portfolios:/portfolios"]
+    environment: ["RELIANT_READY_FILE=/tmp/ready"]
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/ready"]
+      interval: 1s
+      timeout: 1s
+      retries: 120
+      start_period: 5s
+    depends_on:
+      strategy: { condition: service_healthy }
+    networks: [atlas-net]
+    restart: unless-stopped
+
+  ingress:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["/usr/local/bin/ingress", "--daemon", "--bus", "nats://nats:4222", "--portfolios-root", "/portfolios", "--timeframe", "1d", "--candle-db", "/data/candles.db", "--state-db", "/data/state-ingress.sqlite", "--interval", "2"]
+    volumes: ["./data:/data", "./portfolios:/portfolios"]
+    depends_on:
+      enricher: { condition: service_healthy }
+      perm-fix: { condition: service_completed_successfully }
+    networks: [atlas-net]
+    restart: unless-stopped
+
+  tester:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    # build an ingress audit file from the shared candle store, then run the
+    # component-wired backtest over it and fail on any deviation from the
+    # known-good AUDCAD/1d/k=3.5 result.
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        /usr/local/bin/ingress --instrument AUDCAD --timeframe 1d \
+          --candle-db /data/candles.db \
+          --output /data/audit/AUDCAD_all.dat --output-dir /data/audit
+        out=$(/usr/local/bin/backtest --portfolio /config \
+          --ingress '/data/audit/AUDCAD_all.dat') || { echo "$$out"; exit 1; }
+        echo "$$out"
+        echo "$$out" | grep -q 'trades=4 wins=3 win_rate=75.0% total_r=5.000' \
+          || { echo "REGRESSION: component backtest diverged from 4 trades / 3 wins / +5.0R"; exit 1; }
+        echo "backtest regression check passed"
+    volumes: ["./data:/data", "./config:/config"]
+    depends_on:
+      seed: { condition: service_completed_successfully }
+    networks: [atlas-net]
+    profiles: ["test"]
+
+networks:
+  atlas-net:
+    driver: bridge

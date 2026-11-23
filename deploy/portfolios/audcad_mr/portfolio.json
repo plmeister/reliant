@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "id": "audcad_mr",
+  "instruments": [
+    "AUDCAD",
+    "AUDJPY",
+    "AUDNZD",
+    "AUDUSD",
+    "CADJPY",
+    "EURAUD",
+    "EURCAD",
+    "EURCHF",
+    "EURGBP",
+    "EURJPY",
+    "EURNZD",
+    "EURUSD",
+    "GBPAUD",
+    "GBPJPY",
+    "GBPNZD",
+    "GBPUSD",
+    "NZDCAD",
+    "NZDJPY",
+    "NZDUSD",
+    "USDCAD",
+    "USDCHF",
+    "XAGUSD"
+  ],
+  "timeframes": [
+    "1d"
+  ],
+  "tradeTimeframe": "1d",
+  "contextTimeframes": [],
+  "strategy": {
+    "file": "strategy.dsl",
+    "params": {
+      "k": 3.5
+    }
+  },
+  "account": {
+    "startingBalance": 10000,
+    "riskPct": 0.01
+  }
+}

@@ -1,0 +1,1 @@
+{"version":1,"id":"audcad_fast","instruments":["AUDCAD"],"timeframes":["1d"],"tradeTimeframe":"1d","contextTimeframes":[],"strategy":{"file":"strategy.dsl","params":{"k":0.5}},"account":{"startingBalance":5000,"riskPct":0.02}}

@@ -1,0 +1,44 @@
+# Example multi-strategy deployment: shared NATS bus + per-component daemons.
+# Build images first: `docker build -t reliant:latest .`
+services:
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js"]
+    ports:
+      - "4222:4222"
+    networks: [atlas-net]
+
+  ingress:
+    image: reliant:latest
+    command: ["ingress", "--daemon", "--bus", "nats://nats:4222", "--instrument", "AUDCAD", "--timeframe", "1d", "--data-dir", "/data/study", "--interval", "60"]
+    volumes: ["./data:/data"]
+    depends_on: [nats]
+    networks: [atlas-net]
+
+  enricher:
+    image: reliant:latest
+    command: ["enricher", "--daemon", "--bus", "nats://nats:4222", "--context", "strat-a", "--instrument", "AUDCAD", "--timeframe", "1d", "--k", "3.5"]
+    depends_on: [nats]
+    networks: [atlas-net]
+
+  strategy-a:
+    image: reliant:latest
+    command: ["strategy", "--daemon", "--bus", "nats://nats:4222", "--context", "strat-a", "--instrument", "AUDCAD", "--timeframe", "1d", "--k", "3.5"]
+    depends_on: [nats]
+    networks: [atlas-net]
+
+  strategy-b:
+    image: reliant:latest
+    command: ["strategy", "--daemon", "--bus", "nats://nats:4222", "--context", "strat-b", "--instrument", "AUDCAD", "--timeframe", "1d", "--k", "5.0"]
+    depends_on: [nats]
+    networks: [atlas-net]
+
+  trade:
+    image: reliant:latest
+    command: ["trade", "--daemon", "--bus", "nats://nats:4222", "--context", "strat-a", "--instrument", "AUDCAD", "--timeframe", "1d", "--balance", "10000", "--risk", "0.01"]
+    depends_on: [nats]
+    networks: [atlas-net]
+
+networks:
+  atlas-net:
+    driver: bridge

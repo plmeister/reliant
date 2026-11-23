@@ -1,0 +1,6 @@
+target/
+.git/
+/tmp/
+*.db
+*.dat
+*.zstd

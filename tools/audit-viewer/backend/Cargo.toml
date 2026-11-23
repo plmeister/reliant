@@ -1,0 +1,27 @@
+[package]
+name = "audit-server"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[[bin]]
+name = "audit-server"
+path = "src/main.rs"
+
+[dependencies]
+reliant-messaging = { path = "../../../crates/messaging" }
+reliant-datamodel = { path = "../../../crates/datamodel" }
+reliant-portfolio = { path = "../../../crates/portfolio" }
+reliant-store = { path = "../../../crates/store" }
+reliant-dsl = { path = "../../../crates/dsl" }
+reliant-engine = { path = "../../../crates/engine" }
+reliant-cli = { path = "../../../crates/cli" }
+rusqlite = "0.32"
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["fs", "cors"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+chrono = "0.4"
