@@ -11,10 +11,11 @@
   - [x] On a replayed (already-processed) candle, republish cached enrichment without re-running indicators.
   - [x] Strategy/broker replay publish exec candle and setups; broker dedupes setups to avoid duplicate trades.
   - [x] Broker dedupe persisted in context state (survives restart).
-- [ ] Give each hop a durable input.
+- [ ] Give each hop a durable input. (Deferred: JetStream/outbox not yet implemented.)
   - [ ] Option 1: JetStream streams + durable consumers per subject.
   - [ ] Option 2: SQLite outbox per stage with per-consumer offsets.
   - [ ] Choose one and document the trade-offs.
+  - [x] Interim: per-role cursors + cached republish + broker dedupe provide in-process replay.
 - [ ] Make checkpoint advancement transactional with downstream publish.
   - [ ] A role advances its cursor only after processing the bar and publishing output.
   - [ ] State snapshot + cursor write happen in the same flush.
