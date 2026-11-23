@@ -182,7 +182,7 @@ fn flush(
             // The enricher owns the pipeline cursor: its snapshot version is the
             // last bar it consumed. Pin that under a stable key so ingress can
             // read it without parsing the component's state JSON.
-            if let Some(base) = key.strip_suffix(":enricher:state") {
+            if let Some(base) = key.strip_suffix(":state") {
                 batch.push((format!("{base}:cursor"), version.to_string()));
             }
         }

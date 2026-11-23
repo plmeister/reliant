@@ -149,10 +149,24 @@ fn main() {
                                 SqliteCandleStore::new(&candle_db).unwrap();
                             for instrument in &portfolio.instruments {
                                 let sym = Symbol(instrument.clone());
-                                let cursor_key =
-                                    format!("{}:{}:{}:cursor", portfolio.id, instrument, tf_str);
-                                let cursor =
-                                    pipeline_cursor(&mut cursors, &root, &portfolio.id, &cursor_key);
+                                // Per-stage recovery: publish only bars newer than the
+                                // slowest role's cursor. A role that has not yet consumed
+                                // a bar (missing file/cursor) contributes 0, forcing a
+                                // replay of everything for that role.
+                                let mut cursor = i64::MAX;
+                                for role in ["enricher", "strategy", "broker"] {
+                                    let cursor_key = format!(
+                                        "{}:{}:{}:{}:cursor",
+                                        portfolio.id, instrument, tf_str, role
+                                    );
+                                    let c = pipeline_cursor(
+                                        &mut cursors, &root, &portfolio.id, role, &cursor_key,
+                                    );
+                                    cursor = cursor.min(c);
+                                }
+                                if cursor == i64::MAX {
+                                    cursor = 0;
+                                }
                                 let candles = cstore
                                     .range(&sym, &tf, Some(cursor + 1), None)
                                     .unwrap_or_default();
@@ -353,12 +367,14 @@ fn pipeline_cursor(
     cache: &mut HashMap<String, Option<SqliteStateStore>>,
     root: &str,
     portfolio: &str,
+    role: &str,
     key: &str,
 ) -> i64 {
     let path = format!(
-        "{}/{}/state/state-enricher.sqlite",
+        "{}/{}/state/state-{}.sqlite",
         root.trim_end_matches('/'),
-        portfolio
+        portfolio,
+        role
     );
     if matches!(cache.get(&path), None | Some(None)) {
         cache.insert(path.clone(), SqliteStateStore::open_readonly(&path).ok());

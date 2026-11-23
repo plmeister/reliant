@@ -2,9 +2,10 @@
 
 ## Critical: end-to-end recovery (point A)
 
-- [ ] Persist a cursor for every role, not only enricher.
-  - [ ] State writer writes `{base}:cursor` for strategy and broker snapshots too.
-  - [ ] Ingress reads all role cursors and uses the minimum as its resume point.
+- [x] Persist a cursor for every role, not only enricher.
+  - [x] State writer writes `{base}:cursor` for all role snapshots.
+  - [x] Ingress reads all role cursors and uses the minimum as its resume point.
+  - [ ] (Follow-up) cursors alone do not replay downstream events; durable hop still required.
 - [ ] Make stages idempotent but still republish on replay.
   - [ ] Enricher caches last derived enrichment events per bar.
   - [ ] On a replayed (already-processed) candle, skip state mutation but republish cached enrichment.
