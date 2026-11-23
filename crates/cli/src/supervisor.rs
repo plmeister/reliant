@@ -21,7 +21,7 @@ use reliant_engine::{
 use reliant_messaging::{MessageBus, NatsMessageBus, STATE_SUBJECT};
 use reliant_portfolio::{Portfolio, Registry};
 use reliant_store::SqliteStateStore;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
@@ -43,6 +43,12 @@ pub struct Runtime {
     checkpoints: HashMap<(String, Timeframe), StateCheckpoint>,
     /// Results this portfolio's broker resolved, for the shutdown report.
     pub trades: Vec<(f64, String)>,
+    /// Cached enricher output per bar, used to republish without re-running
+    /// indicators when a bar is replayed for downstream recovery.
+    pub enrichment_cache: HashMap<(String, String, i64), Vec<(String, Event)>>,
+    /// Setup signals already acted on by the broker, used to suppress
+    /// duplicates during replay.
+    pub seen_setups: HashSet<String>,
 }
 
 struct Shared {
@@ -462,21 +468,43 @@ fn process_enricher(rt: &mut Runtime, work: Work, out: &mut Vec<(String, Event)>
         return;
     };
     let ts = candle.timestamp.timestamp();
-    if latest(&mut rt.graph, symbol, timeframe).is_some_and(|l| ts <= l) {
-        return;
-    }
+    let is_replay = latest(&mut rt.graph, symbol, timeframe).is_some_and(|l| ts <= l);
+    let cache_key = (symbol.0.clone(), timeframe.as_str().to_string(), ts);
 
     if !work.warmup {
-        out.push((subject(&rt.portfolio.id, "enrichment"), work.event.clone()));
-        let derived = rt.graph.derived("ingress", &work.event);
-        for (stage, event) in derived {
-            out.push((qualified(rt, &stage), event));
+        if is_replay {
+            // Republish the cached enrichment for this bar instead of
+            // re-running indicators, which would mutate already-advanced state.
+            if let Some(cached) = rt.enrichment_cache.get(&cache_key) {
+                out.extend(cached.clone());
+            } else {
+                // No cache (e.g. cold start after restart handled as fresh):
+                // fall back to re-running, without advancing the cursor.
+                out.push((subject(&rt.portfolio.id, "enrichment"), work.event.clone()));
+                let derived = rt.graph.derived("ingress", &work.event);
+                for (stage, event) in derived {
+                    out.push((qualified(rt, &stage), event));
+                }
+            }
+        } else {
+            let mut cached = Vec::new();
+            cached.push((subject(&rt.portfolio.id, "enrichment"), work.event.clone()));
+            out.push(cached[0].clone());
+            let derived = rt.graph.derived("ingress", &work.event);
+            for (stage, event) in derived {
+                let q = qualified(rt, &stage);
+                cached.push((q.clone(), event.clone()));
+                out.push((q, event));
+            }
+            rt.enrichment_cache.insert(cache_key, cached);
         }
     } else {
         // Facts from a warm-up bar only advance the enricher's own context.
         let _ = rt.graph.derived("ingress", &work.event);
     }
-    mark_latest(&mut rt.graph, symbol, timeframe, ts);
+    if !is_replay {
+        mark_latest(&mut rt.graph, symbol, timeframe, ts);
+    }
     checkpoint(rt, symbol, timeframe, out);
 }
 
@@ -488,17 +516,18 @@ fn process_strategy(rt: &mut Runtime, work: Work, out: &mut Vec<(String, Event)>
             candle,
         } => {
             let ts = candle.timestamp.timestamp();
-            if latest(&mut rt.graph, symbol, timeframe).is_some_and(|l| ts <= l) {
-                return;
-            }
+            let is_replay = latest(&mut rt.graph, symbol, timeframe).is_some_and(|l| ts <= l);
             // The closed candle goes out before this bar's setups, on the same
-            // subject, so the broker resolves bar N before applying it.
+            // subject, so the broker resolves bar N before applying it. Replay
+            // must still publish it so downstream roles can catch up.
             out.push((subject(&rt.portfolio.id, "exec"), work.event.clone()));
             let derived = rt.graph.derived("enrichment", &work.event);
             for (stage, event) in derived {
                 out.push((qualified(rt, &stage), event));
             }
-            mark_latest(&mut rt.graph, symbol, timeframe, ts);
+            if !is_replay {
+                mark_latest(&mut rt.graph, symbol, timeframe, ts);
+            }
             checkpoint(rt, symbol, timeframe, out);
         }
         Event::SwingPivotEvent {
@@ -546,17 +575,24 @@ fn process_broker(rt: &mut Runtime, work: Work, out: &mut Vec<(String, Event)>) 
                 return;
             }
             let ts = candle.timestamp.timestamp();
-            if latest(&mut rt.graph, symbol, timeframe).is_some_and(|l| ts <= l) {
-                return;
-            }
+            let is_replay = latest(&mut rt.graph, symbol, timeframe).is_some_and(|l| ts <= l);
             let derived = rt.graph.derived("ingress", &work.event);
-            mark_latest(&mut rt.graph, symbol, timeframe, ts);
+            if !is_replay {
+                mark_latest(&mut rt.graph, symbol, timeframe, ts);
+            }
             emit(rt, derived, out);
             checkpoint(rt, symbol, timeframe, out);
         }
         Event::SetupSignal {
-            symbol, timeframe, ..
+            symbol, timeframe, timestamp, entry, stop, ..
         } => {
+            let key = format!(
+                "{}:{}:{}:{}:{}",
+                symbol.0, timeframe.as_str(), timestamp, entry, stop
+            );
+            if !rt.seen_setups.insert(key) {
+                return;
+            }
             let derived = rt.graph.derived("signal", &work.event);
             emit(rt, derived, out);
             checkpoint(rt, symbol, timeframe, out);
@@ -684,6 +720,8 @@ fn build_runtime(portfolio: &Portfolio, role: Role) -> Result<Runtime, String> {
         graph,
         checkpoints,
         trades: Vec::new(),
+        enrichment_cache: HashMap::new(),
+        seen_setups: HashSet::new(),
     })
 }
 
