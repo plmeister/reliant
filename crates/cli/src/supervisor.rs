@@ -470,13 +470,12 @@ fn process_enricher(rt: &mut Runtime, work: Work, out: &mut Vec<(String, Event)>
 
     if !work.warmup {
         if is_replay {
-            // Republish the cached enrichment for this bar instead of
-            // re-running indicators, which would mutate already-advanced state.
-            if let Some(cached) = rt.enrichment_cache.get(&cache_key) {
-                out.extend(cached.clone());
+            // Prefer the durable cache restored from state; fall back to the
+            // in-memory cache, then to a re-run.
+            let durable = rt.graph.context().get_or_create(symbol.clone(), timeframe.clone()).last_enrichment.clone();
+            if let Some(cached) = durable.or_else(|| rt.enrichment_cache.get(&cache_key).cloned()) {
+                out.extend(cached);
             } else {
-                // No cache (e.g. cold start after restart handled as fresh):
-                // fall back to re-running, without advancing the cursor.
                 out.push((subject(&rt.portfolio.id, "enrichment"), work.event.clone()));
                 let derived = rt.graph.derived("ingress", &work.event);
                 for (stage, event) in derived {
@@ -493,6 +492,8 @@ fn process_enricher(rt: &mut Runtime, work: Work, out: &mut Vec<(String, Event)>
                 cached.push((q.clone(), event.clone()));
                 out.push((q, event));
             }
+            let c = rt.graph.context().get_or_create(symbol.clone(), timeframe.clone());
+            c.last_enrichment = Some(cached.clone());
             rt.enrichment_cache.insert(cache_key, cached);
         }
     } else {

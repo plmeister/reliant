@@ -32,6 +32,8 @@ pub struct Context {
     pub trade_pending_valid: usize,
     /// Setup signals already acted on by the broker (durable dedupe key).
     pub seen_setups: HashSet<String>,
+    /// Cached enricher output for the last processed bar, used for durable replay.
+    pub last_enrichment: Option<Vec<(String, Event)>>,
 }
 
 impl Context {
@@ -42,7 +44,7 @@ impl Context {
                trade_pending: false, trade_pending_market: false, trade_pending_entry: None, trade_pending_stop: None,
                trade_pending_target: None, trade_pending_direction: None, trade_pending_max_hold: None,
                trade_pending_size: None, trade_pending_entry_ts: None, trade_pending_valid: 0,
-               seen_setups: HashSet::new() }
+               seen_setups: HashSet::new(), last_enrichment: None }
     }
 
     pub fn register(&mut self, processor: Box<dyn Processor>) {
@@ -94,6 +96,13 @@ impl Context {
         if let Some(v) = self.trade_pending_entry_ts { map.insert("trade_pending_entry_ts".to_string(), serde_json::json!(v)); }
         map.insert("trade_pending_valid".to_string(), serde_json::json!(self.trade_pending_valid));
         map.insert("seen_setups".to_string(), serde_json::json!(self.seen_setups));
+        if let Some(outputs) = &self.last_enrichment {
+            let arr: Vec<serde_json::Value> = outputs
+                .iter()
+                .map(|(topic, event)| serde_json::json!({"topic": topic, "event": event}))
+                .collect();
+            map.insert("last_enrichment".to_string(), serde_json::json!(arr));
+        }
         serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string())
     }
 
@@ -146,6 +155,22 @@ impl Context {
                 for item in arr {
                     if let Some(k) = item.as_str() { self.seen_setups.insert(k.to_string()); }
                 }
+            }
+            continue;
+        }
+        if name == "last_enrichment" {
+            if let Some(arr) = v.as_array() {
+                let mut out = Vec::new();
+                for item in arr {
+                    if let (Some(topic), Some(ev_val)) =
+                        (item.get("topic").and_then(|x| x.as_str()), item.get("event"))
+                    {
+                        if let Ok(ev) = serde_json::from_value(ev_val.clone()) {
+                            out.push((topic.to_string(), ev));
+                        }
+                    }
+                }
+                self.last_enrichment = Some(out);
             }
             continue;
         }
