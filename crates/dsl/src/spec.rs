@@ -200,6 +200,18 @@ const LEVEL_PARAMS: &[ParamSpec] = &[
         required: false,
         default: Some(DefaultValue::Int(20)),
     },
+    ParamSpec {
+        name: "min_tests",
+        ty: ParamType::Int,
+        required: false,
+        default: Some(DefaultValue::Int(2)),
+    },
+    ParamSpec {
+        name: "cluster_pct",
+        ty: ParamType::Float,
+        required: false,
+        default: Some(DefaultValue::Float(0.005)),
+    },
     TIMEFRAME_PARAM,
 ];
 
@@ -210,6 +222,11 @@ const CANDLE_SIGNAL_PARAMS: &[ParamSpec] = &[
     ParamSpec { name: "target_atr_mult", ty: ParamType::Float, required: false, default: Some(DefaultValue::Float(3.0)) },
     ParamSpec { name: "max_hold_bars", ty: ParamType::Int, required: false, default: Some(DefaultValue::Int(15)) },
     ParamSpec { name: "trigger", ty: ParamType::String, required: false, default: Some(DefaultValue::Str("swing")) },
+    // Tunable filter thresholds (available as variables in `when` expression)
+    ParamSpec { name: "margin", ty: ParamType::Float, required: false, default: Some(DefaultValue::Float(1.0)) },
+    ParamSpec { name: "vol_mult", ty: ParamType::Float, required: false, default: Some(DefaultValue::Float(1.5)) },
+    ParamSpec { name: "body_min", ty: ParamType::Float, required: false, default: Some(DefaultValue::Float(0.5)) },
+    ParamSpec { name: "close_pos_min", ty: ParamType::Float, required: false, default: Some(DefaultValue::Float(0.7)) },
 ];
 
 const STRATEGY_PARAMS: &[ParamSpec] = &[
@@ -279,12 +296,20 @@ const BROKER_PARAMS: &[ParamSpec] = &[
 const BROKER_INPUTS: &[InputSpec] =
     &[InputSpec { name: "trades", accepts: Producer::Trade, required: true }];
 
-const SIZING_PARAMS: &[ParamSpec] = &[ParamSpec {
-    name: "source_filter",
-    ty: ParamType::String,
-    required: false,
-    default: Some(DefaultValue::Str("__auto__")),
-}];
+const SIZING_PARAMS: &[ParamSpec] = &[
+    ParamSpec {
+        name: "source_filter",
+        ty: ParamType::String,
+        required: false,
+        default: Some(DefaultValue::Str("__auto__")),
+    },
+    ParamSpec {
+        name: "risk_pct",
+        ty: ParamType::Float,
+        required: false,
+        default: Some(DefaultValue::Float(0.0)),
+    },
+];
 
 /// Built-in box catalogue. This is the whole vocabulary: adding a box means
 /// adding a spec plus a construction arm in `build`.

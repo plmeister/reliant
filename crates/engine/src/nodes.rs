@@ -802,13 +802,54 @@ impl Node for FilterNode {
 pub struct LevelDetector {
     pub id: String,
     pub lookback: usize,
+    pub min_tests: usize,
+    pub cluster_pct: f64,
     highs: std::collections::VecDeque<f64>,
     lows: std::collections::VecDeque<f64>,
+    volumes: std::collections::VecDeque<f64>,
 }
 
 impl LevelDetector {
     pub fn new(id: &str, lookback: usize) -> Self {
-        Self { id: id.to_string(), lookback: lookback.max(2), highs: std::collections::VecDeque::new(), lows: std::collections::VecDeque::new() }
+        Self::with_params(id, lookback, 2, 0.005)
+    }
+
+    pub fn with_params(id: &str, lookback: usize, min_tests: usize, cluster_pct: f64) -> Self {
+        Self {
+            id: id.to_string(),
+            lookback: lookback.max(2),
+            min_tests: min_tests.max(1),
+            cluster_pct: cluster_pct.max(0.0001),
+            highs: std::collections::VecDeque::new(),
+            lows: std::collections::VecDeque::new(),
+            volumes: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Find the most-tested level among recent highs/lows.
+    /// Returns (level, test_count) if a cluster has >= min_tests touches.
+    fn find_clustered_level(values: &std::collections::VecDeque<f64>, cluster_pct: f64, min_tests: usize) -> Option<(f64, usize)> {
+        if values.is_empty() { return None; }
+        // For each value, count how many values are within cluster_pct of it
+        let mut best_center = 0.0f64;
+        let mut best_count = 0usize;
+        for &v in values {
+            let tolerance = v * cluster_pct;
+            let count = values.iter().filter(|&&x| (x - v).abs() <= tolerance).count();
+            if count > best_count {
+                best_count = count;
+                best_center = v;
+            }
+        }
+        // Refine: average of all values in the cluster
+        if best_count >= min_tests {
+            let tolerance = best_center * cluster_pct;
+            let cluster_vals: Vec<f64> = values.iter().filter(|&&x| (x - best_center).abs() <= tolerance).cloned().collect();
+            let avg = cluster_vals.iter().sum::<f64>() / cluster_vals.len() as f64;
+            Some((avg, cluster_vals.len()))
+        } else {
+            None
+        }
     }
 }
 
@@ -820,22 +861,29 @@ impl Node for LevelDetector {
         if let Event::CandleClosed { symbol, timeframe, candle } = event {
             // Compute from PRIOR bars so a breakout is "current high exceeds
             // the prior rolling max" (resistance excludes the current bar).
-            let resistance = if self.highs.len() >= 1 {
-                Some(self.highs.iter().cloned().fold(f64::MIN, f64::max))
-            } else { None };
-            let support = if self.lows.len() >= 1 {
-                Some(self.lows.iter().cloned().fold(f64::MAX, f64::min))
-            } else { None };
+            // Use clustered levels: only emit if a level has >= min_tests touches.
+            let resistance = Self::find_clustered_level(&self.highs, self.cluster_pct, self.min_tests)
+                .map(|(level, _)| level);
+            let support = Self::find_clustered_level(&self.lows, self.cluster_pct, self.min_tests)
+                .map(|(level, _)| level);
 
             self.highs.push_back(candle.high);
             self.lows.push_back(candle.low);
+            self.volumes.push_back(candle.volume);
             while self.highs.len() > self.lookback { self.highs.pop_front(); }
             while self.lows.len() > self.lookback { self.lows.pop_front(); }
+            while self.volumes.len() > self.lookback { self.volumes.pop_front(); }
+
+            // Track average volume for volume confirmation
+            let avg_volume = if !self.volumes.is_empty() {
+                self.volumes.iter().sum::<f64>() / self.volumes.len() as f64
+            } else { 0.0 };
 
             if let (Some(resistance), Some(support)) = (resistance, support) {
                 let c = ctx.get_or_create(symbol.clone(), timeframe.clone());
                 c.indicators.insert("support".to_string(), support);
                 c.indicators.insert("resistance".to_string(), resistance);
+                c.indicators.insert("avg_volume".to_string(), avg_volume);
                 return vec![
                     ("enrichment".to_string(), Event::IndicatorUpdated {
                         symbol: symbol.clone(),
@@ -849,7 +897,17 @@ impl Node for LevelDetector {
                         name: "resistance".to_string(),
                         value: resistance,
                     }),
+                    ("enrichment".to_string(), Event::IndicatorUpdated {
+                        symbol: symbol.clone(),
+                        timeframe: timeframe.clone(),
+                        name: "avg_volume".to_string(),
+                        value: avg_volume,
+                    }),
                 ];
+            } else {
+                // Still track avg_volume even without clustered levels
+                let c = ctx.get_or_create(symbol.clone(), timeframe.clone());
+                c.indicators.insert("avg_volume".to_string(), avg_volume);
             }
         }
         Vec::new()
@@ -870,6 +928,10 @@ pub struct CandleSignal {
     pub atr_key: String,
     pub swing_key: String,
     pub trigger: String,
+    pub margin: f64,
+    pub vol_mult: f64,
+    pub body_min: f64,
+    pub close_pos_min: f64,
 }
 
 impl CandleSignal {
@@ -886,6 +948,10 @@ impl CandleSignal {
             atr_key: "atr".to_string(),
             swing_key: "swing".to_string(),
             trigger: "swing".to_string(),
+            margin: 1.0,
+            vol_mult: 1.5,
+            body_min: 0.5,
+            close_pos_min: 0.7,
         }
     }
     pub fn with_params(
@@ -912,7 +978,19 @@ impl CandleSignal {
             atr_key: atr_key.into(),
             swing_key: swing_key.into(),
             trigger: trigger.into(),
+            margin: 1.0,
+            vol_mult: 1.5,
+            body_min: 0.5,
+            close_pos_min: 0.7,
         }
+    }
+
+    pub fn with_filters(mut self, margin: f64, vol_mult: f64, body_min: f64, close_pos_min: f64) -> Self {
+        self.margin = margin;
+        self.vol_mult = vol_mult;
+        self.body_min = body_min;
+        self.close_pos_min = close_pos_min;
+        self
     }
 }
 
@@ -940,6 +1018,17 @@ impl Node for CandleSignal {
                 vars.insert("high".to_string(), candle.high);
                 vars.insert("low".to_string(), candle.low);
                 vars.insert("close".to_string(), candle.close);
+                vars.insert("volume".to_string(), candle.volume);
+                vars.insert("margin".to_string(), self.margin);
+                vars.insert("vol_mult".to_string(), self.vol_mult);
+                vars.insert("body_min".to_string(), self.body_min);
+                vars.insert("close_pos_min".to_string(), self.close_pos_min);
+                let range = (candle.high - candle.low).max(1e-10);
+                let body = (candle.close - candle.open).abs();
+                vars.insert("body".to_string(), body);
+                vars.insert("range".to_string(), range);
+                vars.insert("body_ratio".to_string(), body / range);
+                vars.insert("close_pos".to_string(), (candle.close - candle.low) / range);
                 vars.insert("atr".to_string(), atr_v);
                 vars.insert("ema".to_string(), ema_v);
                 vars.insert("resistance".to_string(), resistance);
@@ -998,6 +1087,17 @@ impl Node for CandleSignal {
             vars.insert("high".to_string(), *high);
             vars.insert("low".to_string(), *low);
             vars.insert("close".to_string(), *close);
+            vars.insert("volume".to_string(), 0.0);
+            vars.insert("margin".to_string(), self.margin);
+            vars.insert("vol_mult".to_string(), self.vol_mult);
+            vars.insert("body_min".to_string(), self.body_min);
+            vars.insert("close_pos_min".to_string(), self.close_pos_min);
+            let range = (*high - *low).max(1e-10);
+            let body = (*close - *open).abs();
+            vars.insert("body".to_string(), body);
+            vars.insert("range".to_string(), range);
+            vars.insert("body_ratio".to_string(), body / range);
+            vars.insert("close_pos".to_string(), (*close - *low) / range);
             vars.insert("atr".to_string(), atr_v);
             vars.insert("ema".to_string(), ema_v);
             vars.insert("kind".to_string(), *kind as f64);

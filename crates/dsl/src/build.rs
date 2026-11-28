@@ -110,9 +110,11 @@ fn build_node(
             id,
             &string_param(node, "when")?,
         )),
-        "level" => Box::new(reliant_engine::LevelDetector::new(
+        "level" => Box::new(reliant_engine::LevelDetector::with_params(
             id,
             usize_param(node, "lookback")?,
+            usize_param(node, "min_tests")?,
+            float_param(node, "cluster_pct")?,
         )),
         "strategy" => Box::new(StrategyNode::with_params(
             id,
@@ -139,6 +141,11 @@ fn build_node(
             input(node, "atr")?,
             input(node, "swing")?,
             string_param(node, "trigger")?,
+        ).with_filters(
+            float_param(node, "margin").unwrap_or(1.0),
+            float_param(node, "vol_mult").unwrap_or(1.5),
+            float_param(node, "body_min").unwrap_or(0.5),
+            float_param(node, "close_pos_min").unwrap_or(0.7),
         )),
         "sizing" => {
             let sf = string_param(node, "source_filter").unwrap_or_default();
@@ -149,10 +156,12 @@ fn build_node(
             } else {
                 sf
             };
+            let risk_raw = float_param(node, "risk_pct").unwrap_or(0.0);
+            let risk = if risk_raw > 0.0 { risk_raw } else { options.risk_pct };
             Box::new(GeometryNode::with_source(
                 id,
                 options.balance,
-                options.risk_pct,
+                risk,
                 sf,
             ))
         },

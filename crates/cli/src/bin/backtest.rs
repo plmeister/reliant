@@ -7,6 +7,7 @@ use reliant_messaging::{InMemoryMessageBus, MessageBus, read_audit};
 use reliant_portfolio::Portfolio;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+use serde::{Deserialize, Serialize};
 use std::sync::mpsc;
 use std::thread;
 
@@ -42,6 +43,12 @@ struct Cli {
     /// Write signal events (SetupSignal) as an audit .dat file.
     #[arg(long)]
     signals_out: Option<String>,
+    /// Write a JSON baseline of this run (aggregate + per-symbol) to this path.
+    #[arg(long)]
+    baseline_out: Option<String>,
+    /// Compare this run against a baseline JSON file and print deltas.
+    #[arg(long)]
+    compare: Option<String>,
 }
 
 fn expand_paths(pattern: &str) -> Vec<String> {
@@ -63,6 +70,24 @@ fn expand_paths(pattern: &str) -> Vec<String> {
     } else {
         pattern.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
     }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct BaselineSymbol {
+    trades: usize,
+    wins: usize,
+    total_r: f64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct Baseline {
+    files: usize,
+    symbols: usize,
+    trades: usize,
+    wins: usize,
+    win_rate: f64,
+    total_r: f64,
+    per_symbol: std::collections::BTreeMap<String, BaselineSymbol>,
 }
 
 fn load_portfolio(dir: &str) -> Result<(Vec<String>, Timeframe, Vec<String>, String, f64, f64), String> {
@@ -119,6 +144,7 @@ fn run_one(
         enricher_graphs: HashMap<Timeframe, Graph>,
         strategy_graph: Graph,
         trade_graph: Graph,
+        indicator_snapshots: std::collections::HashMap<i64, serde_json::Map<String, serde_json::Value>>,
         bus: InMemoryMessageBus,
         enricher_ingress: HashMap<Timeframe, mpsc::Receiver<Event>>,
         strategy_enrichment: mpsc::Receiver<Event>,
@@ -178,6 +204,7 @@ fn run_one(
             enricher_graphs,
             strategy_graph: Graph::with_context("", strategy_nodes),
             trade_graph: Graph::with_context("", trade_nodes),
+            indicator_snapshots: std::collections::HashMap::new(),
             bus,
             enricher_ingress: ei_map,
             strategy_enrichment,
@@ -211,6 +238,23 @@ fn run_one(
             let derived = g.process("ingress", &ev, &mut st.bus);
             for (_, e) in &derived {
                 enrichment_events.push(e.clone());
+            }
+            // Capture indicator snapshot for this bar
+            if let Event::CandleClosed { symbol: ev_sym, candle, .. } = ev {
+                let ts = candle.timestamp.timestamp();
+                if let Some(g) = st.enricher_graphs.get_mut(&ev_tf) {
+                    let mut snap = serde_json::Map::new();
+                    for (k, v) in &g.context().get_or_create(ev_sym.clone(), ev_tf.clone()).indicators {
+                        snap.insert(k.clone(), serde_json::json!(v));
+                    }
+                    // Also add candle OHLCV
+                    snap.insert("open".to_string(), serde_json::json!(candle.open));
+                    snap.insert("high".to_string(), serde_json::json!(candle.high));
+                    snap.insert("low".to_string(), serde_json::json!(candle.low));
+                    snap.insert("close".to_string(), serde_json::json!(candle.close));
+                    snap.insert("volume".to_string(), serde_json::json!(candle.volume));
+                    st.indicator_snapshots.insert(ts, snap);
+                }
             }
         }
         // Drain the enricher's bus subscription (already processed above).
@@ -364,6 +408,16 @@ fn run_one(
                     obj.insert("pnl_r".to_string(), serde_json::json!(pnl_r));
                     obj.insert("size".to_string(), serde_json::json!(size));
                     obj.insert("source".to_string(), serde_json::Value::String(source.clone()));
+                    // Attach indicator snapshot at entry time
+                    if let Some(sym) = symbol {
+                        if let Some(st) = states.get(sym) {
+                            if let Some(snap) = st.indicator_snapshots.get(entry_ts) {
+                                for (k, v) in snap {
+                                    obj.insert(format!("ind_{}", k), v.clone());
+                                }
+                            }
+                        }
+                    }
                     if let Ok(line) = serde_json::to_string(&serde_json::Value::Object(obj)) {
                         let _ = writeln!(f, "{}", line);
                     }
@@ -435,14 +489,17 @@ fn main() {
             let mut total_trades = 0usize;
             let mut total_wins = 0usize;
             let mut total_r = 0.0f64;
+            let mut per_symbol = std::collections::BTreeMap::new();
             for sym in &symbols {
                 if let Some((n, w, r)) = results.get(sym) {
                     println!("{:<8} trades={} wins={} total_r={:.3}", sym, n, w, r);
                     total_trades += n;
                     total_wins += w;
                     total_r += r;
+                    per_symbol.insert(sym.clone(), BaselineSymbol { trades: *n, wins: *w, total_r: *r });
                 } else {
                     println!("{:<8} trades=0 wins=0 total_r=0.000", sym);
+                    per_symbol.insert(sym.clone(), BaselineSymbol { trades: 0, wins: 0, total_r: 0.0 });
                 }
             }
             println!("MONTHLY:");
@@ -452,10 +509,60 @@ fn main() {
                     if *mn > 0 { *mw as f64 / *mn as f64 * 100.0 } else { 0.0 },
                     mr);
             }
+            let win_rate = if total_trades > 0 { total_wins as f64 / total_trades as f64 * 100.0 } else { 0.0 };
             println!("AGGREGATE: files={} trades={} wins={} win_rate={:.1}% total_r={:.3}",
-                paths.len(), total_trades, total_wins,
-                if total_trades > 0 { total_wins as f64 / total_trades as f64 * 100.0 } else { 0.0 },
-                total_r);
+                paths.len(), total_trades, total_wins, win_rate, total_r);
+
+            // Baseline capture.
+            let baseline = Baseline {
+                files: paths.len(),
+                symbols: symbols.len(),
+                trades: total_trades,
+                wins: total_wins,
+                win_rate,
+                total_r,
+                per_symbol: per_symbol.clone(),
+            };
+            if let Some(out) = &cli.baseline_out {
+                match serde_json::to_string_pretty(&baseline) {
+                    Ok(json) => {
+                        if let Some(parent) = Path::new(out).parent() { let _ = std::fs::create_dir_all(parent); }
+                        if let Err(e) = std::fs::write(out, json) {
+                            eprintln!("backtest: failed to write baseline {}: {}", out, e);
+                        } else {
+                            println!("backtest: wrote baseline -> {}", out);
+                        }
+                    }
+                    Err(e) => eprintln!("backtest: baseline serialize error: {}", e),
+                }
+            }
+
+            // Baseline diff.
+            if let Some(base_path) = &cli.compare {
+                match std::fs::read_to_string(base_path) {
+                    Ok(raw) => match serde_json::from_str::<Baseline>(&raw) {
+                        Ok(base) => {
+                            println!("COMPARE vs {}:", base_path);
+                            println!("  aggregate: trades {:+} ({} -> {})  wins {:+}  win_rate {:+.1}pp  total_r {:+.3} ({:.3} -> {:.3})",
+                                baseline.trades as i64 - base.trades as i64, base.trades, baseline.trades,
+                                baseline.wins as i64 - base.wins as i64,
+                                baseline.win_rate - base.win_rate,
+                                baseline.total_r - base.total_r, base.total_r, baseline.total_r);
+                            for sym in &symbols {
+                                let cur = baseline.per_symbol.get(sym).cloned().unwrap_or_default();
+                                let old = base.per_symbol.get(sym).cloned().unwrap_or_default();
+                                println!("  {:<8} trades {:+} ({}->{})  wins {:+}  total_r {:+.3} ({:.3}->{:.3})",
+                                    sym,
+                                    cur.trades as i64 - old.trades as i64, old.trades, cur.trades,
+                                    cur.wins as i64 - old.wins as i64,
+                                    cur.total_r - old.total_r, old.total_r, cur.total_r);
+                            }
+                        }
+                        Err(e) => eprintln!("backtest: failed to parse baseline {}: {}", base_path, e),
+                    },
+                    Err(e) => eprintln!("backtest: failed to read baseline {}: {}", base_path, e),
+                }
+            }
         }
         Err(e) => { eprintln!("backtest: {}", e); std::process::exit(2); }
     }

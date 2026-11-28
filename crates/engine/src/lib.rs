@@ -6,7 +6,7 @@ pub mod oanda;
 pub mod tradelogger;
 
 pub use context::{Context, MarketContext};
-pub use expr::{Expr, eval_bool, parse as parse_expr};
+pub use expr::{Expr, eval_bool, parse as parse_expr, extract_numbers, substitute_numbers};
 pub use graph::{Graph, Node};
 pub use reliant_messaging::*;
 pub use nodes::{AtrNode, CandleSignal, CandleSource, DummyBroker, EmaNode, FilterNode, GeometryNode, LevelDetector, StrategyNode, SwingNode};

@@ -274,6 +274,71 @@ pub fn eval_bool(expr: &Expr, ctx: &HashMap<String, f64>) -> bool {
     eval(expr, ctx) != 0.0
 }
 
+
+
+impl std::fmt::Display for Expr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Expr::Number(n) => write!(f, "{}", n),
+            Expr::Var(name) => write!(f, "{}", name),
+            Expr::Unary(Op::Not, e) => write!(f, "not {}", e),
+            Expr::Unary(Op::Neg, e) => write!(f, "-{}", e),
+            Expr::Unary(Op::Abs, e) => write!(f, "abs({})", e),
+            Expr::Unary(_, e) => write!(f, "{}", e),
+            Expr::BinOp(op, l, r) => {
+                let op_str = match op {
+                    Op::Add => "+", Op::Sub => "-", Op::Mul => "*", Op::Div => "/",
+                    Op::Gt => ">", Op::Lt => "<", Op::Ge => ">=", Op::Le => "<=",
+                    Op::Eq => "==", Op::Ne => "!=",
+                    Op::And => "and", Op::Or => "or",
+                    Op::Min => "min", Op::Max => "max",
+                    _ => "?",
+                };
+                if matches!(op, Op::Min | Op::Max) {
+                    write!(f, "{}({}, {})", op_str, l, r)
+                } else {
+                    write!(f, "({} {} {})", l, op_str, r)
+                }
+            }
+        }
+    }
+}
+
+
+
+/// Collect all Number literals in the expression (in-order traversal).
+pub fn extract_numbers(expr: &Expr) -> Vec<f64> {
+    let mut out = Vec::new();
+    fn walk(e: &Expr, out: &mut Vec<f64>) {
+        match e {
+            Expr::Number(n) => out.push(*n),
+            Expr::Var(_) => {}
+            Expr::Unary(_, e) => walk(e, out),
+            Expr::BinOp(_, l, r) => { walk(l, out); walk(r, out); }
+        }
+    }
+    walk(expr, &mut out);
+    out
+}
+
+/// Substitute Number literals with new values (in-order traversal).
+pub fn substitute_numbers(expr: &Expr, values: &[f64]) -> Expr {
+    let mut idx = 0;
+    fn walk(e: &Expr, values: &[f64], idx: &mut usize) -> Expr {
+        match e {
+            Expr::Number(_) => {
+                let v = if *idx < values.len() { values[*idx] } else { 0.0 };
+                *idx += 1;
+                Expr::Number(v)
+            }
+            Expr::Var(name) => Expr::Var(name.clone()),
+            Expr::Unary(op, e) => Expr::Unary(*op, Box::new(walk(e, values, idx))),
+            Expr::BinOp(op, l, r) => Expr::BinOp(*op, Box::new(walk(l, values, idx)), Box::new(walk(r, values, idx))),
+        }
+    }
+    walk(expr, values, &mut idx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
