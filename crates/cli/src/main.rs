@@ -157,6 +157,9 @@ enum Commands {
         /// Minimum trades for a valid candidate.
         #[arg(long, default_value_t = 10)]
         min_trades: usize,
+        /// Transaction cost per trade in R (subtracted from fitness).
+        #[arg(long, default_value_t = 0.0)]
+        cost: f64,
         /// Fitness metric: "train" (default), "val" (validation R), "gap" (train - |val-train| penalty).
         #[arg(long, default_value = "train")]
         fitness: String,
@@ -293,7 +296,7 @@ fn main() {
                 _ => { eprintln!("dev: backtest failed"); std::process::exit(1); }
             }
         }
-        Commands::Evolve { portfolio, dsl, symbols, portfolios_root, mode, params, train, candles_db, train_range, val, val_range, generations, pop, seed, min_trades, fitness, out } => {
+        Commands::Evolve { portfolio, dsl, symbols, portfolios_root, mode, params, train, candles_db, train_range, val, val_range, generations, pop, seed, min_trades, cost, fitness, out } => {
             // simple xorshift64 rng
             struct Rng { state: u64 }
             impl Rng {
@@ -565,11 +568,12 @@ fn main() {
             let fitness = |dsl_text: &str, params: Option<&[f64]>, ingress: &str, min_trades: usize| -> f64 {
                 let (t_train, r_train) = run_candidate(dsl_text, params, ingress);
                 if t_train < min_trades { return -1000.0; }
+                let cost_adj = cost * t_train as f64;
                 if fitness == "val" {
                     if let Some(v) = &val {
                         let (t_v, r_v) = run_candidate(dsl_text, params, v);
                         if t_v < min_trades / 2 { return -1000.0; }
-                        return r_v;
+                        return r_v - cost * t_v as f64;
                     }
                 }
                 if fitness == "gap" {
@@ -577,10 +581,10 @@ fn main() {
                         let (t_v, r_v) = run_candidate(dsl_text, params, v);
                         // penalize train-val gap
                         let gap = (r_train - r_v).abs();
-                        return r_train - gap * 0.5;
+                        return r_train - cost_adj - gap * 0.5;
                     }
                 }
-                r_train
+                r_train - cost_adj
             };
 
             if mode == "combo" {
